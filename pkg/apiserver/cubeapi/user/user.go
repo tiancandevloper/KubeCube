@@ -42,6 +42,7 @@ import (
 	"github.com/kubecube-io/kubecube/pkg/clients"
 	"github.com/kubecube-io/kubecube/pkg/clog"
 	"github.com/kubecube-io/kubecube/pkg/multicluster"
+	"github.com/kubecube-io/kubecube/pkg/utils/audit"
 	"github.com/kubecube-io/kubecube/pkg/utils/constants"
 	"github.com/kubecube-io/kubecube/pkg/utils/errcode"
 	"github.com/kubecube-io/kubecube/pkg/utils/kubeconfig"
@@ -88,8 +89,6 @@ type ResetPwd struct {
 // @Failure 500 {object} errcode.ErrorInfo
 // @Router /api/v1/cube/user [post]
 func CreateUser(c *gin.Context) {
-	c.Set(constants.EventName, "create user")
-	c.Set(constants.EventResourceType, "user")
 	// check param
 	user, errInfo := CheckAndCompleteCreateParam(c)
 	if errInfo != nil {
@@ -102,13 +101,14 @@ func CreateUser(c *gin.Context) {
 		response.FailReturn(c, errInfo)
 		return
 	}
+	c = audit.SetAuditInfo(c, audit.CreateUser, user.Name)
 	response.SuccessReturn(c, nil)
 	return
 }
 
 func CreateUserImpl(c *gin.Context, user *userv1.User) *errcode.ErrorInfo {
 
-	kClient := clients.Interface().Kubernetes(constants.PivotCluster).Direct()
+	kClient := clients.Interface().Kubernetes(constants.LocalCluster).Direct()
 	err := kClient.Create(c.Request.Context(), user)
 	if err != nil {
 		clog.Error("create user error: %s", err)
@@ -129,8 +129,6 @@ func CreateUserImpl(c *gin.Context, user *userv1.User) *errcode.ErrorInfo {
 // @Failure 500 {object} errcode.ErrorInfo
 // @Router /api/v1/cube/user/:username [put]
 func UpdateUser(c *gin.Context) {
-	c.Set(constants.EventName, "update user")
-	c.Set(constants.EventResourceType, "user")
 	//check struct
 	newUser := &userv1.User{}
 	if err := c.ShouldBindJSON(newUser); err != nil {
@@ -164,12 +162,13 @@ func UpdateUser(c *gin.Context) {
 		response.FailReturn(c, errcode.UpdateResourceError(resourceTypeUser))
 		return
 	}
+	c = audit.SetAuditInfo(c, audit.UpdateUser, user.Name)
 	response.SuccessReturn(c, nil)
 	return
 }
 
 func UpdateUserSpecImpl(c *gin.Context, newUser *userv1.User) *errcode.ErrorInfo {
-	kClient := clients.Interface().Kubernetes(constants.PivotCluster).Direct()
+	kClient := clients.Interface().Kubernetes(constants.LocalCluster).Direct()
 	err := kClient.Update(c.Request.Context(), newUser)
 	if err != nil {
 		clog.Error("update user spec to k8s error: %s", err)
@@ -179,7 +178,7 @@ func UpdateUserSpecImpl(c *gin.Context, newUser *userv1.User) *errcode.ErrorInfo
 }
 
 func UpdateUserStatusImpl(c *gin.Context, newUser *userv1.User) *errcode.ErrorInfo {
-	kClient := clients.Interface().Kubernetes(constants.PivotCluster).Direct()
+	kClient := clients.Interface().Kubernetes(constants.LocalCluster).Direct()
 	err := kClient.Status().Update(c.Request.Context(), newUser, &client.UpdateOptions{})
 	if err != nil {
 		clog.Error("update user status to k8s error: %s", err)
@@ -198,11 +197,8 @@ func UpdateUserStatusImpl(c *gin.Context, newUser *userv1.User) *errcode.ErrorIn
 // @Failure 500 {object} errcode.ErrorInfo
 // @Router /api/v1/cube/user  [get]
 func ListUsers(c *gin.Context) {
-	c.Set(constants.EventName, "list users")
-	c.Set(constants.EventResourceType, "user")
-
 	// get all user
-	kClient := clients.Interface().Kubernetes(constants.PivotCluster).Cache()
+	kClient := clients.Interface().Kubernetes(constants.LocalCluster).Cache()
 	allUserList := &userv1.UserList{}
 	err := kClient.List(c.Request.Context(), allUserList)
 	if err != nil {
@@ -244,7 +240,7 @@ func ListUsers(c *gin.Context) {
 }
 
 func GetUserByName(c *gin.Context, name string) (*userv1.User, *errcode.ErrorInfo) {
-	kClient := clients.Interface().Kubernetes(constants.PivotCluster).Cache()
+	kClient := clients.Interface().Kubernetes(constants.LocalCluster).Cache()
 	user := &userv1.User{}
 	var userKey client.ObjectKey
 	userKey.Name = name
@@ -552,7 +548,7 @@ func GetMembersByNS(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	cli := clients.Interface().Kubernetes(constants.PivotCluster)
+	cli := clients.Interface().Kubernetes(constants.LocalCluster)
 
 	// list all roleBindings in namespace
 	roleBindingList := v1.RoleBindingList{}

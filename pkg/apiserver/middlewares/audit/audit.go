@@ -29,37 +29,46 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gogf/gf/v2/i18n/gi18n"
 	"github.com/google/uuid"
 	jsoniter "github.com/json-iterator/go"
 
 	"github.com/kubecube-io/kubecube/pkg/apiserver/middlewares/auth"
 	"github.com/kubecube-io/kubecube/pkg/authentication/authenticators/token"
 	"github.com/kubecube-io/kubecube/pkg/clog"
+	"github.com/kubecube-io/kubecube/pkg/utils/audit"
 	"github.com/kubecube-io/kubecube/pkg/utils/constants"
 	"github.com/kubecube-io/kubecube/pkg/utils/env"
-)
-
-var json = jsoniter.ConfigCompatibleWithStandardLibrary
-
-const (
-	eventActionCreate = "create"
-	eventActionUpdate = "update"
-	eventActionDelete = "delete"
-	eventActionQuery  = "query"
-
-	eventRespBody         = "responseBody"
-	eventResourceKubeCube = "[KubeCube]"
+	"github.com/kubecube-io/kubecube/pkg/utils/international"
 )
 
 var (
+	json           = jsoniter.ConfigCompatibleWithStandardLibrary
 	auditWhiteList = map[string]string{
 		constants.ApiPathRoot + "/audit": "POST",
 	}
 	auditSvc env.AuditSvcApi
 )
 
+const (
+	eventRespBody   = "responseBody"
+	eventObjectName = "objectName"
+)
+
+type Handler struct {
+	EnInstance  *gi18n.Manager
+	EnvInstance *gi18n.Manager
+}
+
 func init() {
 	auditSvc = env.AuditSVC()
+}
+
+func NewHandler(managers *international.Gi18nManagers) Handler {
+	enT := managers.GetInstants("en")
+	envT := managers.GetInstants(env.AuditLanguage())
+	h := Handler{enT, envT}
+	return h
 }
 
 func withinWhiteList(url *url.URL, method string, whiteList map[string]string) bool {
@@ -73,16 +82,22 @@ func withinWhiteList(url *url.URL, method string, whiteList map[string]string) b
 	return false
 }
 
-func Audit() gin.HandlerFunc {
+func (h *Handler) Audit() gin.HandlerFunc {
 	return func(c *gin.Context) {
-
+		// can not get resource name from url when create resource, so handle specially
+		if c.Request.Method == http.MethodPost {
+			c.Set(eventObjectName, getPostObjectName(c))
+		}
 		w := &responseBodyWriter{body: &bytes.Buffer{}, ResponseWriter: c.Writer}
 		c.Writer = w
+
 		c.Next()
-		if !withinWhiteList(c.Request.URL, c.Request.Method, auditWhiteList) {
+
+		if !withinWhiteList(c.Request.URL, c.Request.Method, auditWhiteList) &&
+			!withinWhiteList(c.Request.URL, c.Request.Method, auth.AuthWhiteList) && c.Request.Method != http.MethodGet {
 			clog.Debug("[audit] get event information")
 			e := &Event{
-				EventTime:         time.Now().Unix(),
+				EventTime:         time.Now().UnixNano() / int64(time.Millisecond),
 				EventVersion:      "V1",
 				SourceIpAddress:   c.ClientIP(),
 				RequestMethod:     c.Request.Method,
@@ -94,10 +109,7 @@ func Audit() gin.HandlerFunc {
 				RequestId:         uuid.New().String(),
 				ResponseElements:  w.body.String(),
 				EventSource:       env.AuditEventSource(),
-			}
-
-			if !withinWhiteList(c.Request.URL, c.Request.Method, auth.AuthWhiteList) {
-				e.UserIdentity = getUserIdentity(c)
+				UserIdentity:      getUserIdentity(c),
 			}
 
 			// get response
@@ -113,22 +125,21 @@ func Audit() gin.HandlerFunc {
 			}
 
 			// get event name and description
+			t := h.EnvInstance
+			if t == nil {
+				t = h.EnInstance
+			}
+			ctx := context.Background()
 			eventName, isExist := c.Get(constants.EventName)
 			if isExist == true {
 				e.EventName = eventName.(string)
-				e.Description = eventName.(string)
+				e.Description = t.Translate(ctx, eventName.(string))
+				e.ResourceReports = []Resource{{
+					ResourceType: t.Translate(ctx, c.GetString(audit.EventResourceType)),
+					ResourceName: c.GetString(audit.EventResourceName),
+				}}
 			} else {
-				e = getEventName(c, *e)
-			}
-
-			// get resource type
-			resourceType, isExists := c.Get(constants.EventResourceType)
-			if isExists == true {
-				e.ResourceReports = []Resource{{ResourceType: resourceType.(string)}}
-			} else {
-				if e.ResponseElements != "" {
-
-				}
+				e = h.handleProxyApi(ctx, c, *e)
 			}
 
 			go sendEvent(e)
@@ -176,48 +187,63 @@ func sendEvent(e *Event) {
 }
 
 // get event name and description
-func getEventName(c *gin.Context, e Event) *Event {
+func (h *Handler) handleProxyApi(ctx context.Context, c *gin.Context, e Event) *Event {
 	var (
-		methodStr string
-		object    string
+		objectType string
+		objectName string
 	)
 
-	url := c.Request.RequestURI
-	method := c.Request.Method
-
-	switch method {
-	case http.MethodPost:
-		methodStr = eventActionCreate
-		break
-	case http.MethodPut:
-		methodStr = eventActionUpdate
-		break
-	case http.MethodDelete:
-		methodStr = eventActionDelete
-		break
-	case http.MethodGet:
-		methodStr = eventActionQuery
+	requestURI := c.Request.RequestURI
+	if !strings.HasPrefix(requestURI, "/api/v1/cube/proxy") &&
+		!strings.HasPrefix(requestURI, "/api/v1/cube/extend") {
+		return &e
 	}
 
-	queryUrl := strings.Split(fmt.Sprint(url), "?")[0]
+	queryUrl := strings.Trim(strings.Split(fmt.Sprint(requestURI), "?")[0], "/api/v1/cube")
 	urlstrs := strings.Split(queryUrl, "/")
+	length := len(urlstrs)
 	for i, str := range urlstrs {
 		if str == constants.K8sResourceNamespace {
-			if i+2 < len(urlstrs) {
-				object = urlstrs[i+2]
-			} else {
-				object = constants.K8sResourceNamespace
+			if length == i+1 {
+				objectType = constants.K8sResourceNamespace
+			} else if length == i+2 {
+				objectType = constants.K8sResourceNamespace
+				objectName = urlstrs[i+1]
+
+			} else if length == i+3 {
+				objectType = urlstrs[i+2]
+
+			} else if length == i+4 {
+				objectType = urlstrs[i+2]
+				objectName = urlstrs[i+3]
 			}
 			break
 		}
 
 		if str == constants.K8sResourceVersion && urlstrs[i+1] != constants.K8sResourceNamespace {
-			object = urlstrs[i+1]
+			objectType = urlstrs[i+1]
+			if i+2 < len(urlstrs) {
+				objectName = urlstrs[i+2]
+			}
+			break
 		}
 	}
 
-	e.EventName = eventResourceKubeCube + " " + methodStr + " " + object
-	e.Description = e.EventName
+	method := c.Request.Method
+	e.EventName = h.EnInstance.Translate(ctx, method) + strings.Title(objectType[:len(objectType)-1])
+	t := h.EnvInstance
+	if t == nil {
+		t = h.EnInstance
+	}
+	e.Description = t.Translate(ctx, method) + t.Translate(ctx, objectType)
+
+	if http.MethodPost == method && objectName == "" {
+		objectName = c.GetString(eventObjectName)
+	}
+	e.ResourceReports = []Resource{{
+		ResourceType: objectType[:len(objectType)-1],
+		ResourceName: objectName,
+	}}
 	return &e
 }
 
@@ -291,4 +317,39 @@ func (r responseBodyWriter) Write(b []byte) (int, error) {
 func (r responseBodyWriter) WriteString(s string) (n int, err error) {
 	r.body.WriteString(s)
 	return r.ResponseWriter.WriteString(s)
+}
+
+func getPostObjectName(c *gin.Context) string {
+	// get request body
+	data, err := c.GetRawData()
+	// put request body back
+	c.Request.Body = ioutil.NopCloser(bytes.NewBuffer(data))
+	// get resource name from metadata.name
+	body := make(map[string]interface{})
+	err = json.Unmarshal(data, &body)
+	if err != nil {
+		clog.Error("[audit] unmarshal request body err: %s", err.Error())
+		return ""
+	}
+	metadata, exist := body["metadata"]
+	if !exist {
+		clog.Error("[audit] the resource metadata is nil")
+		return ""
+	}
+	metadataMap, ok := metadata.(map[string]interface{})
+	if !ok {
+		clog.Error("[audit] convert metadata to map failed")
+		return ""
+	}
+	name, exist := metadataMap["name"]
+	if !exist {
+		clog.Error("[audit] the resource metadata.name is nil")
+		return ""
+	}
+	nameStr, ok := name.(string)
+	if !ok {
+		clog.Error("[audit] convert name to string failed")
+		return ""
+	}
+	return nameStr
 }

@@ -18,18 +18,23 @@ package audit
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gogf/gf/v2/i18n/gi18n"
 	"github.com/google/uuid"
-	"github.com/kubecube-io/kubecube/pkg/utils/constants"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/kubecube-io/kubecube/pkg/utils/constants"
 )
 
 type header struct {
@@ -68,36 +73,42 @@ func TestSendEvent(t *testing.T) {
 }
 
 func TestGetEventName(t *testing.T) {
-	e := &Event{}
-	router := gin.New()
-
-	// check get method
-	router.GET("/api/v1/cube/proxy/clusters/:cluster/apis/apps/v1/namespaces/:namespace/statefulsets/:name", func(c *gin.Context) {
-		e = getEventName(c, *e)
-		return
-	})
-	_ = performRequest(router, http.MethodGet, "/api/v1/cube/proxy/clusters/pivot-cluster/apis/apps/v1/namespaces/dev/statefulsets/stsA", []byte(""))
-	if e.EventName != "[KubeCube] query statefulsets" {
+	file, err := os.Getwd()
+	if err != nil {
 		t.Fail()
+		return
+	}
+	file = strings.TrimSuffix(file, "pkg/apiserver/middlewares/audit") + "test/i18n"
+
+	e := &Event{}
+	ctx := context.Background()
+	enInstance := gi18n.Instance()
+	enInstance.SetPath(file)
+	enInstance.SetLanguage("en")
+	h := Handler{
+		enInstance,
+		enInstance,
 	}
 
 	// check post method
-	router.POST("/api/v1/cube/proxy/clusters/:cluster/api/v1/namespaces/:namespace/services", func(c *gin.Context) {
-		e = getEventName(c, *e)
+	router1 := gin.New()
+	router1.POST("/api/v1/cube/proxy/clusters/:cluster/api/v1/namespaces/:namespace/services", func(c *gin.Context) {
+		e = h.handleProxyApi(ctx, c, *e)
 		return
 	})
-	_ = performRequest(router, http.MethodPost, "/api/v1/cube/proxy/clusters/pivot-cluster/api/v1/namespaces/dev/services", []byte(""))
-	if e.EventName != "[KubeCube] create services" {
+	_ = performRequest(router1, http.MethodPost, "/api/v1/cube/proxy/clusters/pivot-cluster/api/v1/namespaces/dev/services", []byte(""))
+	if e.EventName != "createService" {
 		t.Fail()
 	}
 
 	// check put method
-	router.PUT("/api/v1/cube/proxy/clusters/:cluster/api/v1/namespaces/:namespace/secrets/:name", func(c *gin.Context) {
-		e = getEventName(c, *e)
+	router2 := gin.New()
+	router2.PUT("/api/v1/cube/proxy/clusters/:cluster/api/v1/namespaces/:namespace/secrets/:name", func(c *gin.Context) {
+		e = h.handleProxyApi(ctx, c, *e)
 		return
 	})
-	_ = performRequest(router, http.MethodPut, "/api/v1/cube/proxy/clusters/pivot-cluster/api/v1/namespaces/dev/secrets/secretA", []byte(""))
-	if e.EventName != "[KubeCube] update secrets" {
+	_ = performRequest(router2, http.MethodPut, "/api/v1/cube/proxy/clusters/pivot-cluster/api/v1/namespaces/dev/secrets/secretA", []byte(""))
+	if e.EventName != "updateSecret" {
 		t.Fail()
 	}
 }
